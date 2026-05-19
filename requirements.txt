@@ -1,0 +1,8 @@
+streamlit>=1.28.0
+pandas>=2.0.0
+openpyxl==3.1.5
+plotly>=5.0.0
+azure-identity>=1.17.0
+azure-mgmt-subscription>=3.1.1
+azure-mgmt-resourcegraph>=8.0.0
+azure-mgmt-costmanagement>=4.0.1
