@@ -236,18 +236,22 @@ def render_azure_api_page():
     subscriptions = azure_data.get("subscriptions", pd.DataFrame())
     inventory = azure_data.get("inventory", pd.DataFrame())
     costs = azure_data.get("costs", pd.DataFrame())
+    compliance = azure_data.get("compliance", pd.DataFrame())
 
     if subscriptions.empty:
         st.warning("No readable subscriptions were returned for this Azure identity.")
         return
 
-    tab_inventory, tab_cost = st.tabs(["Azure Inventory", "Azure Cost"])
+    tab_inventory, tab_cost, tab_compliance = st.tabs(["Azure Inventory", "Azure Cost", "Azure Compliance"])
 
     with tab_inventory:
         render_azure_inventory_dashboard(subscriptions, inventory)
 
     with tab_cost:
         render_azure_cost_dashboard(subscriptions, costs)
+    
+    with tab_compliance:
+        render_azure_compliance_dashboard(subscriptions, compliance, inventory)
 
 
 def render_azure_inventory_dashboard(subscriptions: pd.DataFrame, inventory: pd.DataFrame):
@@ -413,6 +417,176 @@ def render_azure_cost_dashboard(subscriptions: pd.DataFrame, costs: pd.DataFrame
 
     st.dataframe(filtered, width='stretch', hide_index=True, height=420)
     dataframe_download_buttons(filtered, "azure_api_cost", "AzureCost")
+
+
+def render_azure_compliance_dashboard(subscriptions: pd.DataFrame, compliance: pd.DataFrame, inventory: pd.DataFrame):
+    """Render compliance dashboard with compliant vs non-compliant resources."""
+    st.subheader("Azure Compliance")
+    
+    if compliance.empty:
+        st.info("No Azure Policy compliance data was returned. Ensure Azure Policy is configured in your subscriptions.")
+        return
+
+    subscription_names = subscriptions.set_index("subscription_id")["subscription_name"].to_dict()
+    compliance = compliance.copy()
+    compliance["subscription_name"] = compliance["subscription_id"].map(subscription_names).fillna(compliance["subscription_id"])
+    
+    # Create inventory lookup for additional resource details
+    inventory_lookup = {}
+    if not inventory.empty:
+        for _, row in inventory.iterrows():
+            inventory_lookup[str(row.get("resource_id", "")).lower()] = row.to_dict()
+    
+    # Filter options
+    filter_cols = st.columns(4)
+    selected_subscription = filter_cols[0].selectbox(
+        "Subscription",
+        ["All"] + sorted(compliance["subscription_name"].dropna().unique().tolist()),
+        key="azure_compliance_subscription",
+    )
+    selected_group = filter_cols[1].selectbox(
+        "Resource group",
+        ["All"] + sorted(compliance["resource_group"].dropna().unique().tolist()),
+        key="azure_compliance_group",
+    )
+    selected_compliance = filter_cols[2].selectbox(
+        "Compliance state",
+        ["All", "Compliant", "Non-Compliant", "Unknown"],
+        key="azure_compliance_state",
+    )
+    search_term = filter_cols[3].text_input("Search", key="azure_compliance_search")
+    
+    filtered = compliance.copy()
+    
+    if selected_subscription != "All":
+        filtered = filtered[filtered["subscription_name"] == selected_subscription]
+    if selected_group != "All":
+        filtered = filtered[filtered["resource_group"] == selected_group]
+    if selected_compliance != "All":
+        compliance_state_map = {
+            "Compliant": "Compliant",
+            "Non-Compliant": "NonCompliant",
+            "Unknown": "Unknown",
+        }
+        target_state = compliance_state_map.get(selected_compliance)
+        filtered = filtered[
+            filtered["compliance_state"].fillna("Unknown").str.lower() == 
+            target_state.lower() if target_state else filtered
+        ]
+    if search_term:
+        mask = filtered.astype(str).apply(
+            lambda column: column.str.contains(search_term, case=False, na=False)
+        ).any(axis=1)
+        filtered = filtered[mask]
+    
+    # Display metrics
+    total_resources = len(filtered)
+    compliant_count = (filtered["compliance_state"].fillna("").str.lower() == "compliant").sum()
+    non_compliant_count = (filtered["compliance_state"].fillna("").str.lower() == "noncompliant").sum()
+    unknown_count = total_resources - compliant_count - non_compliant_count
+    compliance_rate = (compliant_count / total_resources * 100) if total_resources > 0 else 0
+    
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Total Resources", f"{total_resources:,}")
+    metric_cols[1].metric("Compliant", f"{compliant_count:,}", delta=f"{compliance_rate:.1f}%")
+    metric_cols[2].metric("Non-Compliant", f"{non_compliant_count:,}")
+    metric_cols[3].metric("Unknown", f"{unknown_count:,}")
+    metric_cols[4].metric("Compliance Rate", f"{compliance_rate:.1f}%")
+    
+    # Visualizations
+    chart_cols = st.columns(2)
+    with chart_cols[0]:
+        # Compliance status pie chart
+        status_data = filtered["compliance_state"].fillna("Unknown").value_counts().reset_index()
+        status_data.columns = ["Compliance State", "Count"]
+        status_data["Compliance State"] = status_data["Compliance State"].str.replace("noncompliant", "Non-Compliant", case=False)
+        safe_chart(
+            status_data,
+            lambda data: px.pie(data, values="Count", names="Compliance State", title="Compliance Status Distribution"),
+            "No compliance state data is available.",
+        )
+    
+    with chart_cols[1]:
+        # Resources by policy
+        policy_data = filtered["policy_assignment_name"].value_counts().head(10).reset_index()
+        policy_data.columns = ["Policy", "Count"]
+        safe_chart(
+            policy_data,
+            lambda data: px.bar(data, x="Count", y="Policy", orientation="h", title="Top Policies", text="Count"),
+            "No policy assignment data is available.",
+        )
+    
+    # Resource group distribution
+    group_data = filtered.groupby(["resource_group", "compliance_state"], as_index=False).size()
+    group_data.columns = ["Resource Group", "Compliance State", "Count"]
+    group_data["Compliance State"] = group_data["Compliance State"].fillna("Unknown")
+    if not group_data.empty:
+        st.subheader("Resources by Resource Group and Compliance State")
+        safe_chart(
+            group_data,
+            lambda data: px.bar(data, x="Resource Group", y="Count", color="Compliance State", 
+                               title="Resource Distribution", barmode="group"),
+            "No resource group data is available.",
+        )
+    
+    # Detailed resource table with expandable rows
+    st.subheader("Resource Details")
+    
+    # Create a display dataframe
+    display_df = filtered[[
+        "resource_name",
+        "resource_group",
+        "subscription_name",
+        "compliance_state",
+        "policy_assignment_name",
+        "policy_definition_name",
+    ]].copy()
+    display_df.columns = ["Resource", "Resource Group", "Subscription", "Compliance State", "Policy Assignment", "Policy Definition"]
+    
+    # Show the dataframe
+    st.dataframe(display_df, width='stretch', hide_index=True, height=420)
+    
+    # Option to view detailed resource information
+    if not filtered.empty:
+        st.subheader("View Resource Details")
+        selected_resource = st.selectbox(
+            "Select a resource to view details:",
+            options=filtered["resource_name"].unique().tolist(),
+            key="compliance_resource_selector",
+        )
+        
+        if selected_resource:
+            resource_rows = filtered[filtered["resource_name"] == selected_resource]
+            if not resource_rows.empty:
+                for idx, (_, row) in enumerate(resource_rows.iterrows()):
+                    with st.expander(f"{selected_resource} - {row.get('compliance_state', 'Unknown')} - Policy: {row.get('policy_assignment_name', 'Unknown')}"):
+                        # Show compliance details
+                        detail_cols = st.columns(2)
+                        with detail_cols[0]:
+                            st.write("**Resource Information**")
+                            st.write(f"- **Resource ID**: {row.get('resource_id', 'N/A')}")
+                            st.write(f"- **Resource Name**: {row.get('resource_name', 'N/A')}")
+                            st.write(f"- **Resource Group**: {row.get('resource_group', 'N/A')}")
+                            st.write(f"- **Subscription**: {row.get('subscription_name', 'N/A')}")
+                            st.write(f"- **Compliance State**: {row.get('compliance_state', 'Unknown')}")
+                        
+                        with detail_cols[1]:
+                            st.write("**Policy Information**")
+                            st.write(f"- **Policy Assignment**: {row.get('policy_assignment_name', 'N/A')}")
+                            st.write(f"- **Policy Definition**: {row.get('policy_definition_name', 'N/A')}")
+                            st.write(f"- **Policy Action**: {row.get('policy_definition_action', 'N/A')}")
+                            st.write(f"- **Last Evaluated**: {row.get('timestamp', 'N/A')}")
+                        
+                        # Show inventory data if available
+                        resource_id_lower = str(row.get("resource_id", "")).lower()
+                        if resource_id_lower in inventory_lookup:
+                            inv_data = inventory_lookup[resource_id_lower]
+                            st.write("**Inventory Data**")
+                            for key in ["resource_type_friendly", "location", "owner", "tag_count"]:
+                                if key in inv_data:
+                                    st.write(f"- **{key.replace('_', ' ').title()}**: {inv_data[key]}")
+    
+    dataframe_download_buttons(display_df, "azure_compliance", "Compliance")
 
 
 try:

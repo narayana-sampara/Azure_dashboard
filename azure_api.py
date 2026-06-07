@@ -224,15 +224,78 @@ Resources
 
         return pd.DataFrame(rows)
 
+    def query_compliance(self, subscription_ids: Iterable[str]) -> pd.DataFrame:
+        """Query Azure Policy compliance state for resources.
+        
+        Uses Azure Resource Graph to query PolicyResources and PolicyStates.
+        Returns a dataframe with compliance information for each resource.
+        """
+        from azure.mgmt.resourcegraph import ResourceGraphClient
+        from azure.mgmt.resourcegraph.models import QueryRequest
+
+        subscriptions = list(subscription_ids)
+        if not subscriptions:
+            return pd.DataFrame()
+
+        # Query PolicyResources table for compliance state information
+        query = """
+policyResources
+| where type == "microsoft.policyinsights/policystates"
+| extend
+    resource_id = resourceId,
+    resource_name = split(resourceId, "/")[-1],
+    resource_group = split(resourceId, "/")[4],
+    subscription_id = subscriptionId,
+    compliance_state = properties.complianceState,
+    policy_assignment_id = properties.policyAssignmentId,
+    policy_definition_id = properties.policyDefinitionId,
+    policy_assignment_name = properties.policyAssignmentName,
+    policy_definition_name = properties.policyDefinitionName,
+    policy_definition_action = properties.policyDefinitionAction
+| project
+    resource_id,
+    resource_name,
+    resource_group,
+    subscription_id,
+    compliance_state,
+    policy_assignment_id,
+    policy_assignment_name,
+    policy_definition_id,
+    policy_definition_name,
+    policy_definition_action,
+    timestamp = tostring(properties.timestamp)
+| order by subscription_id asc, resource_group asc, resource_name asc
+"""
+        client = ResourceGraphClient(self.credential)
+        try:
+            result = client.resources(QueryRequest(subscriptions=subscriptions, query=query))
+            data = getattr(result, "data", []) or []
+            compliance = pd.DataFrame(data)
+            
+            if compliance.empty:
+                return compliance
+            
+            # Normalize compliance_state values
+            compliance["compliance_state"] = compliance.get("compliance_state", "Unknown").fillna("Unknown")
+            compliance["is_compliant"] = compliance["compliance_state"].str.lower() == "compliant"
+            
+            return compliance
+        except Exception as exc:
+            # Fallback: return empty dataframe with a warning message
+            print(f"Note: Compliance query may not be available: {exc}")
+            return pd.DataFrame()
+
     def load_inventory_and_costs(self, cost_days: int = 30) -> Dict[str, pd.DataFrame]:
         subscriptions = self.list_subscriptions()
         subscription_ids = subscriptions["subscription_id"].dropna().tolist() if not subscriptions.empty else []
         inventory = self.query_inventory(subscription_ids)
         costs = self.query_costs(subscription_ids, days=cost_days)
+        compliance = self.query_compliance(subscription_ids)
         return {
             "subscriptions": subscriptions,
             "inventory": inventory,
             "costs": costs,
+            "compliance": compliance,
         }
 
 

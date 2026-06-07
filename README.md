@@ -46,12 +46,25 @@ The `Azure API Dashboards` page provides live Azure data visualization with dive
 - **Daily Cost Trend**: Line chart with markers tracking cost trends over time
 - **Cost Filtering**: Dynamic filters by subscription, service, and resource group
 
+### Azure Compliance Dashboard
+- **Compliance Status Overview**: Metrics showing total resources, compliant count, non-compliant count, and overall compliance rate
+- **Compliance Status Distribution**: Pie chart visualizing the breakdown of resources by compliance state
+- **Top Policies**: Bar chart displaying the most common policy assignments affecting resources
+- **Resources by Resource Group**: Stacked bar chart showing resource distribution across resource groups with compliance state breakdown
+- **Resource Details View**: Interactive expandable rows for viewing detailed compliance information for each resource:
+  - Resource information (ID, name, group, subscription, compliance state)
+  - Policy information (assignment name, definition name, action, timestamp)
+  - Inventory data (resource type, location, owner, tag count)
+- **Compliance Filtering**: Dynamic filters by subscription, resource group, compliance state, and search term
+- **Export Options**: Download compliance data as CSV or Excel file
+
 ## Azure API Dashboard Configuration
 
 The `Azure API Dashboards` page can query live Azure data for:
 
 - **Azure Inventory** from Azure Resource Graph
 - **Azure Cost** from Azure Cost Management
+- **Azure Compliance** from Azure Policy (via Resource Graph PolicyResources)
 
 The page accepts these connectivity values:
 
@@ -82,8 +95,9 @@ Keep `AZURE_CLIENT_SECRET` outside the config file where possible. For local ser
 
 Required Azure permissions:
 
-- Reader on target subscriptions for Azure Resource Graph inventory.
-- Cost Management Reader, Billing Reader, or equivalent cost access for Azure Cost.
+- **Reader** on target subscriptions for Azure Resource Graph inventory
+- **Cost Management Reader**, **Billing Reader**, or equivalent for Azure Cost Management
+- **Policy Insights Reader** or similar role for Azure Policy compliance data (PolicyStates in Resource Graph)
 
 ## Run With Docker
 
