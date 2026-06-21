@@ -21,7 +21,12 @@ from azure_api import (
     load_azure_environment_config,
     parse_subscription_ids,
 )
-from data_loader import UNKNOWN_OWNER, initialize_data_manager
+from data_loader import (
+    DEFAULT_EXCEL_FILE,
+    UNKNOWN_OWNER,
+    initialize_data_manager,
+    initialize_data_manager_from_azure,
+)
 
 
 load_azure_environment_config()
@@ -58,9 +63,39 @@ st.markdown(
 )
 
 
-@st.cache_resource
+@st.cache_resource(ttl=1800)
 def load_data_manager():
-    return initialize_data_manager()
+    """Load live Azure inventory, falling back to the configured workbook."""
+    try:
+        sdk_ready, sdk_error = azure_sdk_status()
+        if not sdk_ready:
+            raise RuntimeError(f"Azure SDK unavailable: {sdk_error}")
+
+        config = AzureConnectionConfig(
+            tenant_id=os.getenv("AZURE_TENANT_ID", ""),
+            application_id=os.getenv("AZURE_CLIENT_ID", ""),
+            object_id=os.getenv("AZURE_OBJECT_ID", ""),
+            client_secret=os.getenv("AZURE_CLIENT_SECRET", ""),
+            subscription_ids=parse_subscription_ids(os.getenv("AZURE_SUBSCRIPTION_IDS", "")),
+        )
+        client = AzureApiDataClient(config)
+        subscriptions = client.list_subscriptions()
+        subscription_ids = (
+            subscriptions["subscription_id"].dropna().astype(str).tolist()
+            if not subscriptions.empty else list(config.subscription_ids)
+        )
+        inventory = client.query_inventory(subscription_ids)
+        manager = initialize_data_manager_from_azure(inventory, subscriptions)
+        return manager, "Azure Resource Graph", ""
+    except Exception as azure_error:
+        try:
+            manager = initialize_data_manager(DEFAULT_EXCEL_FILE)
+        except Exception as workbook_error:
+            raise RuntimeError(
+                f"Azure loading failed: {azure_error}. "
+                f"Excel fallback '{DEFAULT_EXCEL_FILE}' also failed: {workbook_error}"
+            ) from workbook_error
+        return manager, f"Excel fallback ({DEFAULT_EXCEL_FILE})", str(azure_error)
 
 
 def safe_chart(df: pd.DataFrame, chart_factory, empty_message: str):
@@ -218,7 +253,7 @@ def render_azure_api_page():
         st.error("Application ID / Client ID is required for this Azure API connection.")
         return
 
-    with st.spinner("Querying Azure subscriptions, inventory, and cost data..."):
+    with st.spinner("Querying Azure subscriptions, inventory, cost, and compliance data..."):
         try:
             azure_data = load_azure_data(
                 tenant_id=tenant_id,
@@ -237,7 +272,6 @@ def render_azure_api_page():
     inventory = azure_data.get("inventory", pd.DataFrame())
     costs = azure_data.get("costs", pd.DataFrame())
     compliance = azure_data.get("compliance", pd.DataFrame())
-
     if subscriptions.empty:
         st.warning("No readable subscriptions were returned for this Azure identity.")
         return
@@ -590,20 +624,24 @@ def render_azure_compliance_dashboard(subscriptions: pd.DataFrame, compliance: p
 
 
 try:
-    dm = load_data_manager()
+    dm, data_source, source_error = load_data_manager()
 except Exception as exc:
-    st.error(f"Unable to load the Azure inventory workbook: {exc}")
+    st.error(f"Unable to load Azure inventory or Excel fallback: {exc}")
     st.stop()
 
 if dm.inventory.empty:
-    st.warning("No Resources sheet was found in the workbook.")
+    st.warning("No Azure resources are available from the service connection or Excel fallback.")
     st.stop()
 
 st.title("Azure Inventory Dashboard")
-st.caption("Manager-friendly view of resources, ownership, operations, and searchable inventory.")
+st.caption(f"Manager-friendly view of resources, ownership, operations, and searchable inventory. Source: {data_source}.")
 
-if st.sidebar.button("Refresh workbook data"):
+if source_error:
+    st.warning(f"Direct Azure loading failed; using {DEFAULT_EXCEL_FILE}. Azure error: {source_error}")
+
+if st.sidebar.button("Refresh Azure data"):
     st.cache_resource.clear()
+    st.cache_data.clear()
     st.rerun()
 
 page = st.sidebar.radio(
@@ -624,7 +662,7 @@ if page == "Azure API Dashboards":
 elif page == "Overview":
     st.header("Overview")
     st.markdown(
-        '<div class="section-note">Portfolio snapshot from the Resources sheet, enriched with owner data where available.</div>',
+        '<div class="section-note">Live Azure portfolio snapshot, with the inventory workbook used only when the service connection is unavailable.</div>',
         unsafe_allow_html=True,
     )
 
@@ -674,7 +712,7 @@ elif page == "Overview":
         )
 
     with chart_cols[1]:
-        st.subheader("Workbook coverage")
+        st.subheader("Data source coverage")
         workbook_summary = dm.workbook_summary()
         st.dataframe(workbook_summary, width='stretch', hide_index=True, height=360)
 
@@ -734,7 +772,7 @@ elif page == "Ownership":
 elif page == "Operations":
     st.header("Operations")
     st.markdown(
-        '<div class="section-note">Operational signals are shown where the workbook provides enough detail.</div>',
+        '<div class="section-note">Operational signals are shown where the active data source provides enough detail.</div>',
         unsafe_allow_html=True,
     )
 
@@ -812,6 +850,5 @@ else:
 
 
 st.caption(
-    f"Loaded {len(dm.source_sheet_names)} source workbook sheets. Primary source: Resources. "
-    "Raw workbook tabs are preserved."
+    f"Active data source: {data_source}. Loaded {len(dm.inventory):,} resources."
 )

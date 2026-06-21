@@ -1,8 +1,8 @@
 """
 Manager-friendly Azure inventory data layer.
 
-The workbook remains the source of truth. This module normalizes the mixed
-sheet and column naming into a small set of canonical fields for the dashboard.
+Azure Resource Graph is the primary source. This module adapts live inventory
+and normalizes the fallback workbook into the same canonical dashboard fields.
 """
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ def _readable_sheet_category(sheet_name: str) -> str:
 
 
 class AzureInventoryDataManager:
-    """Loads the workbook and exposes cleaned, manager-friendly dataframes."""
+    """Adapts live Azure or workbook data into manager-friendly dataframes."""
 
     def __init__(self, excel_file: str = DEFAULT_EXCEL_FILE):
         self.excel_file = Path(excel_file)
@@ -159,6 +159,69 @@ class AzureInventoryDataManager:
 
         self.inventory = self._build_inventory()
         return self.sheets_data
+
+    def load_azure_inventory(
+        self,
+        inventory: pd.DataFrame,
+        subscriptions: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
+        """Populate the manager from live Azure Resource Graph data."""
+        resources = inventory.copy()
+        if resources.empty:
+            raise ValueError("Azure Resource Graph returned no resources.")
+
+        if subscriptions is not None and not subscriptions.empty and "subscription_id" in resources.columns:
+            subscription_columns = [
+                column for column in ("subscription_id", "subscription_name")
+                if column in subscriptions.columns
+            ]
+            if len(subscription_columns) == 2 and "subscription_name" not in resources.columns:
+                resources = resources.merge(
+                    subscriptions[subscription_columns].drop_duplicates("subscription_id"),
+                    on="subscription_id",
+                    how="left",
+                )
+
+        resources["raw_resource_type"] = resources.get("resource_type", "")
+        if "resource_type_friendly" in resources.columns:
+            resources["resource_type"] = resources["resource_type_friendly"]
+        else:
+            resources["resource_type"] = resources["raw_resource_type"].map(_normalize_resource_type)
+        if "service_category" not in resources.columns:
+            resources["service_category"] = resources["raw_resource_type"].map(_service_category)
+        if "owner" not in resources.columns:
+            resources["owner"] = UNKNOWN_OWNER
+        resources["owner"] = (
+            resources["owner"]
+            .replace({"": UNKNOWN_OWNER, "Missing owner tag": UNKNOWN_OWNER})
+            .fillna(UNKNOWN_OWNER)
+        )
+        resources["status"] = "Not reported"
+        resources["source_sheet"] = "Azure Resource Graph"
+        if "subscription_name" not in resources.columns:
+            resources["subscription_name"] = "Unknown"
+        resources["subscription_name"] = resources["subscription_name"].replace("", "Unknown").fillna("Unknown")
+
+        required_text_columns = ("resource_name", "resource_group", "location", "subscription_id")
+        for column in required_text_columns:
+            if column not in resources.columns:
+                resources[column] = ""
+
+        self.inventory = resources
+        self.sheet_names = ["Azure Resource Graph"]
+        self.source_sheet_names = ["Azure Resource Graph"]
+        self.sheets_data = {"Azure Resource Graph": resources.copy()}
+
+        raw_types = resources["raw_resource_type"].fillna("").astype(str).str.lower()
+        live_views = {
+            "Virtual Machine": raw_types.eq("microsoft.compute/virtualmachines"),
+            "StorageAccounts": raw_types.eq("microsoft.storage/storageaccounts"),
+            "NSG": raw_types.eq("microsoft.network/networksecuritygroups"),
+            "All_Vnets_Subnets_Prefix": raw_types.eq("microsoft.network/virtualnetworks"),
+        }
+        for name, mask in live_views.items():
+            self.sheets_data[name] = resources.loc[mask].copy()
+        return self.inventory
 
     def _drop_blank_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         usable_columns = [
@@ -381,4 +444,13 @@ class AzureInventoryDataManager:
 def initialize_data_manager(excel_file: str = DEFAULT_EXCEL_FILE) -> AzureInventoryDataManager:
     manager = AzureInventoryDataManager(excel_file)
     manager.load_all_sheets()
+    return manager
+
+
+def initialize_data_manager_from_azure(
+    inventory: pd.DataFrame,
+    subscriptions: Optional[pd.DataFrame] = None,
+) -> AzureInventoryDataManager:
+    manager = AzureInventoryDataManager()
+    manager.load_azure_inventory(inventory, subscriptions)
     return manager

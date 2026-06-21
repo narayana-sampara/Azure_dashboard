@@ -31,9 +31,10 @@ def query_compliance(self, subscription_ids: Iterable[str]) -> pd.DataFrame:
 - `timestamp`: Last evaluation time
 
 **Error Handling:**
-- Returns empty DataFrame if query fails
-- Logs warnings for unavailable compliance data
-- Allows dashboard to continue with partial data
+- The main dashboard loads inventory directly from Azure Resource Graph
+- Azure subscription and inventory failures fall back to `file/All_Resources_Inventory 1.xlsx`
+- The active source and Azure failure reason are displayed in the dashboard
+- Manual refresh clears cached Azure data and retries the direct service connection
 
 ### 2. Data Integration Layer (azure_api.py)
 

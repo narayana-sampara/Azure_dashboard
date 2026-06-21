@@ -1,6 +1,6 @@
 # Azure Inventory Dashboard
 
-Manager-friendly Streamlit dashboard and Excel workbook for reviewing Azure resource inventory, ownership, operations signals, and searchable exports.
+Manager-friendly Streamlit dashboard for reviewing live Azure resource inventory, ownership, operations signals, and searchable exports. The Excel inventory is retained as a fallback.
 
 ## What This Solution Provides
 
@@ -89,7 +89,7 @@ AZURE_OBJECT_ID=<object-id>
 AZURE_SUBSCRIPTION_IDS=<subscription-id-1>,<subscription-id-2>
 ```
 
-The app loads `azure_config.env` at startup. Platform environment variables still override file values when present.
+The app loads `azure_config.env` at startup. Platform environment variables still override file values when present. The Overview, Ownership, Operations, and Inventory Search pages first load subscriptions and inventory through the direct Azure service connection. If SDK initialization, authentication, subscription discovery, or Resource Graph inventory loading fails, they fall back to `file/All_Resources_Inventory 1.xlsx` and display the Azure error.
 
 Keep `AZURE_CLIENT_SECRET` outside the config file where possible. For local service principal testing, set it in your shell or hosting platform secret settings.
 
@@ -149,7 +149,7 @@ Azure_dashboard/
 
 ## Workbook Notes
 
-The original workbook tabs remain the source of truth. The dashboard uses `Resources` as the primary inventory and enriches ownership from `PIC` where a resource match exists. Blank `Unnamed` columns are ignored in manager-facing views.
+Azure Resource Graph is the primary inventory source. The original workbook is loaded only as a fallback and uses `Resources` as its primary inventory, enriched with ownership from `PIC` where a resource match exists. Blank `Unnamed` columns are ignored in manager-facing views.
 
 The workbook now includes these front-facing tabs:
 
